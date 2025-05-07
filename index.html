@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MP4 Grid Player - Custom Player Count</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      margin: 0;
+    }
+
+    .controls {
+      margin: 20px 0;
+      position: sticky;
+      top: 0;
+      background: #fff;
+      padding: 10px;
+      border-bottom: 1px solid #ccc;
+      z-index: 10;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 8px;
+    }
+
+    .player {
+      border: 1px solid #ccc;
+      padding: 5px;
+      border-radius: 4px;
+      background: #f2f2f2;
+      text-align: center;
+    }
+
+    video {
+      width: 100%;
+      height: auto;
+    }
+
+    button, input[type="number"] {
+      margin: 6px 6px 6px 0;
+      padding: 6px;
+    }
+  </style>
+</head>
+<body>
+  <h2>Upload MP4 and Create Multiple Looping Players</h2>
+
+  <label for="playerCountInput">Number of Players: </label>
+  <input type="number" id="playerCountInput" min="1" max="10000" value="100" />
+  <button id="generateBtn">Generate</button>
+
+  <br><br>
+  <input type="file" accept="video/mp4" id="mp4Uploader">
+
+  <div class="controls">
+    <button id="playAll" disabled>Play All</button>
+    <button id="pauseAll" disabled>Pause All</button>
+  </div>
+
+  <div id="playersContainer" class="grid"></div>
+
+  <script>
+    const uploader = document.getElementById('mp4Uploader');
+    const playerCountInput = document.getElementById('playerCountInput');
+    const generateBtn = document.getElementById('generateBtn');
+    const playersContainer = document.getElementById('playersContainer');
+    const playAllBtn = document.getElementById('playAll');
+    const pauseAllBtn = document.getElementById('pauseAll');
+
+    let players = [];
+    let fileURL = null;
+
+    function generatePlayers(count) {
+      playersContainer.innerHTML = '';
+      players = [];
+
+      for (let i = 0; i < count; i++) {
+        const playerDiv = document.createElement('div');
+        playerDiv.className = 'player';
+
+        const label = document.createElement('div');
+        label.textContent = `Video ${i + 1}`;
+
+        const video = document.createElement('video');
+        video.controls = true;
+        video.loop = true;
+        video.src = fileURL;
+        video.autoplay = true;
+        video.muted = true;
+
+        playerDiv.appendChild(label);
+        playerDiv.appendChild(video);
+        playersContainer.appendChild(playerDiv);
+
+        players.push(video);
+      }
+
+      playAllBtn.disabled = false;
+      pauseAllBtn.disabled = false;
+    }
+
+    generateBtn.addEventListener('click', () => {
+      if (!fileURL) {
+        alert("Please upload an MP4 file first.");
+        return;
+      }
+      const count = parseInt(playerCountInput.value, 10);
+      if (isNaN(count) || count < 1 || count > 10000) {
+        alert("Please enter a valid number between 1 and 10,000.");
+        return;
+      }
+      generatePlayers(count);
+    });
+
+    uploader.addEventListener('change', (event) => {
+      const file = event.target.files[0];
+      if (!file || !file.type.startsWith('video/')) return;
+
+      fileURL = URL.createObjectURL(file);
+      const count = parseInt(playerCountInput.value, 10);
+      generatePlayers(count);
+    });
+
+    playAllBtn.addEventListener('click', () => {
+      players.forEach(player => player.play());
+    });
+
+    pauseAllBtn.addEventListener('click', () => {
+      players.forEach(player => player.pause());
+    });
+  </script>
+</body>
+</html>
