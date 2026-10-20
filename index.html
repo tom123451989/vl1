@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MP4 Grid Player - Custom Player Count</title>
   <style>
     body {
@@ -32,28 +33,78 @@
       border-radius: 4px;
       background: #f2f2f2;
       text-align: center;
+      min-width: 0;
     }
 
-    video {
+    video, .youtube-frame {
+      display: block;
       width: 100%;
+      aspect-ratio: 16 / 9;
       height: auto;
+      border: 0;
+      background: #000;
     }
 
-    button, input[type="number"] {
+    button, input[type="number"], input[type="url"], input[type="text"] {
       margin: 6px 6px 6px 0;
       padding: 6px;
+      box-sizing: border-box;
+    }
+
+    .link-controls {
+      margin: 12px 0;
+      padding: 12px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+    }
+
+    #videoUrlInput {
+      width: min(620px, 100%);
+    }
+
+    .hint {
+      color: #555;
+      font-size: 0.9rem;
+      margin: 4px 0 8px;
+    }
+
+    .player-label {
+      overflow-wrap: anywhere;
+      margin-bottom: 5px;
+    }
+
+    .remove-link {
+      margin-top: 5px;
+    }
+
+    .status {
+      margin: 8px 0;
+      color: #333;
+      font-size: 0.9rem;
     }
   </style>
 </head>
 <body>
-  <h2>Upload MP4 and Create Multiple Looping Players</h2>
+  <h2>Upload Videos and Create Multiple Looping Players</h2>
 
   <label for="playerCountInput">Number of Players: </label>
   <input type="number" id="playerCountInput" min="1" max="10000" value="100" />
   <button id="generateBtn">Generate</button>
 
   <br><br>
-  <input type="file" accept="video/mp4" id="mp4Uploader">
+  <label for="mp4Uploader">Upload video from disk: </label>
+  <input type="file" accept="video/*" id="mp4Uploader">
+
+  <div class="link-controls">
+    <label for="videoUrlInput"><strong>Add a YouTube or direct video link:</strong></label><br>
+    <input type="url" id="videoUrlInput" placeholder="Paste YouTube, Shorts, MP4, or WebM URL" />
+    <button id="addLinkBtn">Add Link</button>
+    <div class="hint">
+      YouTube videos/Shorts and direct browser-supported video URLs are supported.
+      Some YouTube videos may block embedding. Direct links must point to a playable video file.
+    </div>
+    <div id="linkStatus" class="status" aria-live="polite"></div>
+  </div>
 
   <div class="controls">
     <button id="playAll" disabled>Play All</button>
@@ -69,67 +120,282 @@
     const playersContainer = document.getElementById('playersContainer');
     const playAllBtn = document.getElementById('playAll');
     const pauseAllBtn = document.getElementById('pauseAll');
+    const videoUrlInput = document.getElementById('videoUrlInput');
+    const addLinkBtn = document.getElementById('addLinkBtn');
+    const linkStatus = document.getElementById('linkStatus');
 
+    // Each source is either a local/uploaded/direct video or a YouTube embed.
+    let sources = [];
     let players = [];
     let fileURL = null;
+    let generatedCount = 0;
 
-    function generatePlayers(count) {
-      playersContainer.innerHTML = '';
-      players = [];
+    function getValidPlayerCount() {
+      const count = Number.parseInt(playerCountInput.value, 10);
+      if (!Number.isInteger(count) || count < 1 || count > 10000) {
+        alert("Please enter a valid number between 1 and 10,000.");
+        return null;
+      }
+      return count;
+    }
 
-      for (let i = 0; i < count; i++) {
-        const playerDiv = document.createElement('div');
-        playerDiv.className = 'player';
+    function parseYouTubeUrl(rawUrl) {
+      let url;
+      try {
+        url = new URL(rawUrl);
+      } catch {
+        return null;
+      }
 
-        const label = document.createElement('div');
-        label.textContent = `Video ${i + 1}`;
+      const host = url.hostname.toLowerCase().replace(/^www\./, '').replace(/^m\./, '');
+      let id = null;
 
+      if (host === 'youtu.be') {
+        id = url.pathname.split('/').filter(Boolean)[0] || null;
+      } else if (host === 'youtube.com' || host === 'youtube-nocookie.com') {
+        if (url.pathname === '/watch') {
+          id = url.searchParams.get('v');
+        } else {
+          const parts = url.pathname.split('/').filter(Boolean);
+          if (['shorts', 'embed', 'live', 'v'].includes(parts[0])) {
+            id = parts[1] || null;
+          }
+        }
+      } else {
+        return null;
+      }
+
+      // YouTube video IDs are normally 11 characters.
+      if (!id || !/^[a-zA-Z0-9_-]{6,20}$/.test(id)) return null;
+
+      const startValue = url.searchParams.get('start') || url.searchParams.get('t');
+      let startSeconds = 0;
+      if (startValue) {
+        if (/^\d+$/.test(startValue)) {
+          startSeconds = Number(startValue);
+        } else {
+          const match = startValue.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/);
+          if (match) {
+            startSeconds = (Number(match[1] || 0) * 3600)
+              + (Number(match[2] || 0) * 60)
+              + Number(match[3] || 0);
+          }
+        }
+      }
+
+      return { id, startSeconds };
+    }
+
+    function normalizeVideoUrl(rawUrl) {
+      let url;
+      try {
+        url = new URL(rawUrl);
+      } catch {
+        return null;
+      }
+      if (!['http:', 'https:'].includes(url.protocol)) return null;
+      return url.href;
+    }
+
+    function makeSource(rawUrl, name) {
+      const youtube = parseYouTubeUrl(rawUrl);
+      if (youtube) {
+        return {
+          type: 'youtube',
+          id: youtube.id,
+          startSeconds: youtube.startSeconds,
+          name: name || `YouTube: ${youtube.id}`
+        };
+      }
+
+      const normalized = normalizeVideoUrl(rawUrl);
+      if (!normalized) return null;
+
+      // URLs are treated as direct video URLs unless recognized as YouTube.
+      return {
+        type: 'direct',
+        url: normalized,
+        name: name || normalized
+      };
+    }
+
+    function setLinkStatus(message) {
+      linkStatus.textContent = message;
+    }
+
+    function createPlayer(source, index) {
+      const playerDiv = document.createElement('div');
+      playerDiv.className = 'player';
+
+      const label = document.createElement('div');
+      label.className = 'player-label';
+      label.textContent = `Video ${index + 1} — ${source.name}`;
+      playerDiv.appendChild(label);
+
+      let mediaElement;
+
+      if (source.type === 'youtube') {
+        const iframe = document.createElement('iframe');
+        iframe.className = 'youtube-frame';
+        iframe.title = `YouTube player ${index + 1}`;
+        iframe.src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(source.id)}?playsinline=1&start=${source.startSeconds || 0}&rel=0&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`;
+        iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+        iframe.allowFullscreen = true;
+        iframe.loading = 'lazy';
+        iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+        mediaElement = iframe;
+      } else {
         const video = document.createElement('video');
         video.controls = true;
         video.loop = true;
-        video.src = fileURL;
-        video.autoplay = true;
         video.muted = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        video.src = source.type === 'upload' ? source.url : source.url;
+        mediaElement = video;
+      }
 
-        playerDiv.appendChild(label);
-        playerDiv.appendChild(video);
-        playersContainer.appendChild(playerDiv);
+      playerDiv.appendChild(mediaElement);
 
-        players.push(video);
+      const removeButton = document.createElement('button');
+      removeButton.type = 'button';
+      removeButton.className = 'remove-link';
+      removeButton.textContent = 'Remove';
+      removeButton.addEventListener('click', () => {
+        const currentIndex = sources.indexOf(source);
+        if (currentIndex !== -1) sources.splice(currentIndex, 1);
+        renderPlayers(generatedCount);
+      });
+      playerDiv.appendChild(removeButton);
+
+      playersContainer.appendChild(playerDiv);
+      players.push(mediaElement);
+    }
+
+    function renderPlayers(count) {
+      playersContainer.innerHTML = '';
+      players = [];
+      generatedCount = count;
+
+      if (sources.length === 0) {
+        playAllBtn.disabled = true;
+        pauseAllBtn.disabled = true;
+        return;
+      }
+
+      // Preserve the existing custom player-count behavior. When the requested
+      // count exceeds source count, repeat sources to fill the requested grid.
+      for (let i = 0; i < count; i++) {
+        const source = sources[i % sources.length];
+        createPlayer(source, i);
       }
 
       playAllBtn.disabled = false;
       pauseAllBtn.disabled = false;
     }
 
+    function generatePlayers(count) {
+      renderPlayers(count);
+    }
+
     generateBtn.addEventListener('click', () => {
-      if (!fileURL) {
-        alert("Please upload an MP4 file first.");
-        return;
-      }
-      const count = parseInt(playerCountInput.value, 10);
-      if (isNaN(count) || count < 1 || count > 10000) {
-        alert("Please enter a valid number between 1 and 10,000.");
+      const count = getValidPlayerCount();
+      if (count === null) return;
+
+      if (sources.length === 0) {
+        alert("Please upload a video or add a video link first.");
         return;
       }
       generatePlayers(count);
     });
 
     uploader.addEventListener('change', (event) => {
-      const file = event.target.files[0];
-      if (!file || !file.type.startsWith('video/')) return;
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      if (!file.type.startsWith('video/')) {
+        alert("Please select a valid video file.");
+        uploader.value = '';
+        return;
+      }
 
+      if (fileURL) URL.revokeObjectURL(fileURL);
       fileURL = URL.createObjectURL(file);
-      const count = parseInt(playerCountInput.value, 10);
-      generatePlayers(count);
+
+      // Keep upload-from-disk workflow: the newly selected file becomes the
+      // active source and is immediately rendered using the selected count.
+      sources = [{
+        type: 'upload',
+        url: fileURL,
+        name: file.name
+      }];
+
+      const count = getValidPlayerCount();
+      if (count !== null) {
+        generatePlayers(count);
+        setLinkStatus(`Loaded local video: ${file.name}`);
+      }
+    });
+
+    addLinkBtn.addEventListener('click', () => {
+      const rawUrl = videoUrlInput.value.trim();
+      if (!rawUrl) {
+        setLinkStatus('Paste a video URL first.');
+        return;
+      }
+
+      const source = makeSource(rawUrl);
+      if (!source) {
+        setLinkStatus('That URL is not valid. Use an http(s) YouTube or direct video URL.');
+        return;
+      }
+
+      sources.push(source);
+      videoUrlInput.value = '';
+
+      const count = getValidPlayerCount();
+      if (count !== null) {
+        generatePlayers(count);
+        setLinkStatus(`Added ${source.type === 'youtube' ? 'YouTube' : 'direct video'} link.`);
+      } else {
+        setLinkStatus('Link added to the source list. Enter a valid player count and click Generate.');
+      }
+    });
+
+    videoUrlInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') addLinkBtn.click();
     });
 
     playAllBtn.addEventListener('click', () => {
-      players.forEach(player => player.play());
+      players.forEach(player => {
+        if (player instanceof HTMLVideoElement) {
+          const result = player.play();
+          if (result && typeof result.catch === 'function') result.catch(() => {});
+        } else if (player instanceof HTMLIFrameElement) {
+          // Send YouTube's documented iframe-player command to this embed.
+          // Playback can still be blocked by browser or video-level restrictions.
+          player.contentWindow.postMessage(
+            JSON.stringify({ event: 'command', func: 'playVideo', args: '' }),
+            'https://www.youtube-nocookie.com'
+          );
+        }
+      });
     });
 
     pauseAllBtn.addEventListener('click', () => {
-      players.forEach(player => player.pause());
+      players.forEach(player => {
+        if (player instanceof HTMLVideoElement) {
+          player.pause();
+        } else if (player instanceof HTMLIFrameElement) {
+          player.contentWindow.postMessage(
+            JSON.stringify({ event: 'command', func: 'pauseVideo', args: '' }),
+            'https://www.youtube-nocookie.com'
+          );
+        }
+      });
+    });
+
+    window.addEventListener('beforeunload', () => {
+      if (fileURL) URL.revokeObjectURL(fileURL);
     });
   </script>
 </body>
