@@ -109,6 +109,7 @@
   <div class="controls">
     <button id="playAll" disabled>Play All</button>
     <button id="pauseAll" disabled>Pause All</button>
+    <button id="repeatAll" disabled aria-pressed="false">Repeat All: Off</button>
   </div>
 
   <div id="playersContainer" class="grid"></div>
@@ -120,6 +121,7 @@
     const playersContainer = document.getElementById('playersContainer');
     const playAllBtn = document.getElementById('playAll');
     const pauseAllBtn = document.getElementById('pauseAll');
+    const repeatAllBtn = document.getElementById('repeatAll');
     const videoUrlInput = document.getElementById('videoUrlInput');
     const addLinkBtn = document.getElementById('addLinkBtn');
     const linkStatus = document.getElementById('linkStatus');
@@ -129,6 +131,10 @@
     let players = [];
     let fileURL = null;
     let generatedCount = 0;
+    let repeatAllEnabled = false;
+    let youtubeApiReady = false;
+    let youtubePlayers = new Map();
+    let youtubeApiLoading = false;
 
     function getValidPlayerCount() {
       const count = Number.parseInt(playerCountInput.value, 10);
@@ -238,16 +244,19 @@
         const iframe = document.createElement('iframe');
         iframe.className = 'youtube-frame';
         iframe.title = `YouTube player ${index + 1}`;
-        iframe.src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(source.id)}?playsinline=1&start=${source.startSeconds || 0}&rel=0&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}`;
+        const playerId = `youtube-player-${index}-${Math.random().toString(36).slice(2, 9)}`;
+        iframe.id = playerId;
+        iframe.src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(source.id)}?playsinline=1&start=${source.startSeconds || 0}&rel=0&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&loop=${repeatAllEnabled ? 1 : 0}&playlist=${encodeURIComponent(source.id)}`;
         iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
         iframe.allowFullscreen = true;
         iframe.loading = 'lazy';
         iframe.referrerPolicy = 'strict-origin-when-cross-origin';
         mediaElement = iframe;
+        if (repeatAllEnabled) ensureYouTubeApi();
       } else {
         const video = document.createElement('video');
         video.controls = true;
-        video.loop = true;
+        video.loop = repeatAllEnabled;
         video.muted = true;
         video.playsInline = true;
         video.preload = 'metadata';
@@ -280,6 +289,7 @@
       if (sources.length === 0) {
         playAllBtn.disabled = true;
         pauseAllBtn.disabled = true;
+        repeatAllBtn.disabled = true;
         return;
       }
 
@@ -292,6 +302,9 @@
 
       playAllBtn.disabled = false;
       pauseAllBtn.disabled = false;
+      repeatAllBtn.disabled = false;
+      repeatAllBtn.textContent = `Repeat All: ${repeatAllEnabled ? 'On' : 'Off'}`;
+      repeatAllBtn.setAttribute('aria-pressed', String(repeatAllEnabled));
     }
 
     function generatePlayers(count) {
@@ -365,20 +378,78 @@
       if (event.key === 'Enter') addLinkBtn.click();
     });
 
+    function sendYouTubeCommand(iframe, func, args = []) {
+      if (!iframe || !iframe.contentWindow) return;
+      iframe.contentWindow.postMessage(
+        JSON.stringify({ event: 'command', func, args }),
+        'https://www.youtube-nocookie.com'
+      );
+    }
+
+    function ensureYouTubeApi() {
+      if (youtubeApiReady || youtubeApiLoading) return;
+      youtubeApiLoading = true;
+      window.onYouTubeIframeAPIReady = () => {
+        youtubeApiReady = true;
+        youtubeApiLoading = false;
+        initializeYouTubePlayers();
+      };
+      const existingScript = document.querySelector('script[data-youtube-iframe-api]');
+      if (!existingScript) {
+        const script = document.createElement('script');
+        script.src = 'https://www.youtube.com/iframe_api';
+        script.async = true;
+        script.dataset.youtubeIframeApi = 'true';
+        script.onerror = () => {
+          youtubeApiLoading = false;
+          setLinkStatus('Could not load YouTube controls. YouTube embeds may still play manually.');
+        };
+        document.head.appendChild(script);
+      }
+    }
+
+    function initializeYouTubePlayers() {
+      if (!youtubeApiReady || !window.YT || !window.YT.Player) return;
+      players.forEach((element) => {
+        if (!(element instanceof HTMLIFrameElement) || youtubePlayers.has(element.id)) return;
+        try {
+          const ytPlayer = new YT.Player(element.id, {
+            events: {
+              onReady: (event) => {
+                if (repeatAllEnabled) {
+                  const videoId = event.target.getVideoData().video_id;
+                  event.target.setLoop(true);
+                  if (videoId) event.target.setPlaylist([videoId]);
+                }
+              },
+              onStateChange: (event) => {
+                if (repeatAllEnabled && event.data === YT.PlayerState.ENDED) {
+                  event.target.seekTo(0, true);
+                  event.target.playVideo();
+                }
+              }
+            }
+          });
+          youtubePlayers.set(element.id, ytPlayer);
+        } catch (error) {
+          // The embed remains usable manually if the API cannot control it.
+        }
+      });
+    }
+
     playAllBtn.addEventListener('click', () => {
       players.forEach(player => {
         if (player instanceof HTMLVideoElement) {
           const result = player.play();
           if (result && typeof result.catch === 'function') result.catch(() => {});
         } else if (player instanceof HTMLIFrameElement) {
-          // Send YouTube's documented iframe-player command to this embed.
-          // Playback can still be blocked by browser or video-level restrictions.
-          player.contentWindow.postMessage(
-            JSON.stringify({ event: 'command', func: 'playVideo', args: '' }),
-            'https://www.youtube-nocookie.com'
-          );
+          sendYouTubeCommand(player, 'playVideo');
         }
       });
+      if (players.some(player => player instanceof HTMLIFrameElement)) {
+        ensureYouTubeApi();
+        initializeYouTubePlayers();
+      }
     });
 
     pauseAllBtn.addEventListener('click', () => {
@@ -386,15 +457,44 @@
         if (player instanceof HTMLVideoElement) {
           player.pause();
         } else if (player instanceof HTMLIFrameElement) {
-          player.contentWindow.postMessage(
-            JSON.stringify({ event: 'command', func: 'pauseVideo', args: '' }),
-            'https://www.youtube-nocookie.com'
-          );
+          sendYouTubeCommand(player, 'pauseVideo');
         }
       });
     });
 
+    repeatAllBtn.addEventListener('click', () => {
+      repeatAllEnabled = !repeatAllEnabled;
+      repeatAllBtn.textContent = `Repeat All: ${repeatAllEnabled ? 'On' : 'Off'}`;
+      repeatAllBtn.setAttribute('aria-pressed', String(repeatAllEnabled));
+
+      players.forEach(player => {
+        if (player instanceof HTMLVideoElement) {
+          player.loop = repeatAllEnabled;
+        } else if (player instanceof HTMLIFrameElement) {
+          // YouTube's IFrame Player API provides reliable looping when available.
+          sendYouTubeCommand(player, 'setLoop', [repeatAllEnabled]);
+          const ytPlayer = youtubePlayers.get(player.id);
+          if (ytPlayer && typeof ytPlayer.setLoop === 'function') {
+            ytPlayer.setLoop(repeatAllEnabled);
+            if (repeatAllEnabled && typeof ytPlayer.setPlaylist === 'function') {
+              const videoId = ytPlayer.getVideoData().video_id;
+              if (videoId) ytPlayer.setPlaylist([videoId]);
+            }
+          }
+        }
+      });
+
+      if (repeatAllEnabled && players.some(player => player instanceof HTMLIFrameElement)) {
+        ensureYouTubeApi();
+        initializeYouTubePlayers();
+      }
+    });
+
     window.addEventListener('beforeunload', () => {
+      youtubePlayers.forEach(player => {
+        try { player.destroy(); } catch (error) {}
+      });
+      youtubePlayers.clear();
       if (fileURL) URL.revokeObjectURL(fileURL);
     });
   </script>
